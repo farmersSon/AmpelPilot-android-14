@@ -1,6 +1,5 @@
 package de.hsaugsburg.ampelpilot;
 
-import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
 import android.content.Intent;
@@ -11,7 +10,9 @@ import android.widget.Button;
 import android.widget.SeekBar;
 import android.widget.TextView;
 
-public class SettingsActivity extends Activity {
+import androidx.appcompat.app.AppCompatActivity;
+
+public class SettingsActivity extends AppCompatActivity {
 
     private TextView text_Frames;
     private TextView text_Scale;

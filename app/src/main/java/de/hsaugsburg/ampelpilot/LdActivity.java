@@ -1,10 +1,12 @@
 package de.hsaugsburg.ampelpilot;
 
-import android.app.Activity;
-import android.app.AlertDialog;
+import androidx.appcompat.app.AlertDialog;
+import androidx.appcompat.app.AppCompatActivity;
+
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.res.Configuration;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
@@ -16,7 +18,7 @@ import android.os.Vibrator;
 import android.os.VibratorManager;
 import android.speech.tts.TextToSpeech;
 import android.util.Log;
-import android.view.ContextThemeWrapper;
+import android.view.Surface;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.Button;
@@ -43,7 +45,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.Locale;
 
-public class LdActivity extends Activity implements CvCameraViewListener2, SensorEventListener {
+public class LdActivity extends AppCompatActivity implements CvCameraViewListener2, SensorEventListener {
 
     private static final String TAG = "OCVSample::Activity";
     private static final Scalar GREEN_RECT_COLOR = new Scalar(0, 255, 0, 255);
@@ -73,9 +75,10 @@ public class LdActivity extends Activity implements CvCameraViewListener2, Senso
         OpenCVLoader.initDebug();
     }
 
-    private String helpText = "Halten Sie das Handy im Landschaftsmodus. Falls Sie das Handy falsch halten wird es vibrieren und eine Sprachnachricht wird abgespielt.\n" +
+    private String helpText = "Halten Sie das Handy hoch oder quer und richten Sie die Kamera auf die Ampel. " +
+            "Falls Sie das Handy falsch halten wird es vibrieren und eine Sprachnachricht wird abgespielt.\n" +
             "\n" +
-            "In den Settings können Sie die Werte zur Erkennung umstellen.\n" +
+            "In den Settings k\u00f6nnen Sie die Werte zur Erkennung umstellen.\n" +
             "\n" +
             "Der Anbieter dieser App \u00fcbernimmt keine Haftung f\u00fcr Sach- und Personensch\u00e4den, welche durch die Nutzung von \u201eAmpel-Pilot\u201c entstehen.";
 
@@ -294,16 +297,39 @@ public class LdActivity extends Activity implements CvCameraViewListener2, Senso
         mRgba.release();
     }
 
+    /**
+     * Determines if the device is currently in portrait orientation.
+     */
+    private boolean isPortrait() {
+        int rotation = getWindowManager().getDefaultDisplay().getRotation();
+        return rotation == Surface.ROTATION_0 || rotation == Surface.ROTATION_180;
+    }
+
     public Mat onCameraFrame(CvCameraViewFrame inputFrame) {
         mRgba = inputFrame.rgba();
 
+        boolean portrait = isPortrait();
+
+        // In portrait mode, rotate the frame so detection works on upright image
+        Mat frameToProcess;
+        if (portrait) {
+            // OpenCV JavaCameraView delivers frames in landscape orientation.
+            // Rotate 90 degrees clockwise for portrait processing.
+            Mat rotated = new Mat();
+            Core.transpose(mRgba, rotated);
+            Core.flip(rotated, rotated, 1);
+            frameToProcess = rotated;
+        } else {
+            frameToProcess = mRgba;
+        }
+
         float zoom = (float) 0.6;
-        Size orig = mRgba.size();
+        Size orig = frameToProcess.size();
         int offx = (int) (0.5 * (1.0 - zoom) * orig.width);
         int offy = (int) (0.5 * (1.0 - zoom) * orig.height);
 
         // crop the part, you want to zoom into:
-        Mat cropped = mRgba.submat(offy, (int) orig.height - offy, offx, (int) orig.width - offx);
+        Mat cropped = frameToProcess.submat(offy, (int) orig.height - offy, offx, (int) orig.width - offx);
 
         // resize to original:
         Imgproc.resize(cropped, cropped, orig);
@@ -344,15 +370,26 @@ public class LdActivity extends Activity implements CvCameraViewListener2, Senso
         if (lightgreen.checklight()) {
             Log.w("step", "onCameraFrame: " + System.currentTimeMillis() + "   " + SytsemTime);
             if ((System.currentTimeMillis() - SytsemTime) > 2000) {
-                speak("Es ist Grün");
+                speak("Es ist Gr\u00fcn");
                 SytsemTime = System.currentTimeMillis();
             }
-            Log.w("step", "onCameraFrame:  #################### Grün wurde erkannt");
+            Log.w("step", "onCameraFrame:  #################### Gr\u00fcn wurde erkannt");
         }
         for (int i = 0; i < greenArray.length; i++) {
             Imgproc.rectangle(cropped, greenArray[i].tl(), greenArray[i].br(),
                     GREEN_RECT_COLOR, 3);
         }
+
+        // If portrait, rotate result back for display
+        if (portrait) {
+            Mat displayMat = new Mat();
+            Core.flip(cropped, displayMat, 1);
+            Core.transpose(displayMat, displayMat);
+            // We need to resize back to original mRgba dimensions for display
+            Imgproc.resize(displayMat, displayMat, mRgba.size());
+            return displayMat;
+        }
+
         return cropped;
     }
 
@@ -363,6 +400,12 @@ public class LdActivity extends Activity implements CvCameraViewListener2, Senso
         }
     }
 
+    /**
+     * Sensor-based tilt detection.
+     * Adapts the roll/pitch checks based on current device orientation:
+     * - Landscape: original behavior (roll = tilt up/down, pitch = tilt left/right)
+     * - Portrait: swap roll and pitch axes since the device is rotated 90 degrees
+     */
     public void onSensorChanged(SensorEvent event) {
 
         long newMillis = System.currentTimeMillis();
@@ -376,16 +419,26 @@ public class LdActivity extends Activity implements CvCameraViewListener2, Senso
             boolean success = SensorManager.getRotationMatrix(R, I, mGravity, mGeomagnetic);
             if (success) {
                 float orientation[] = new float[3];
-                SensorManager.getOrientation(R, orientation);
-                float azimut = orientation[0];
+
+                // Remap coordinate system based on current orientation
+                boolean portrait = isPortrait();
+                if (portrait) {
+                    // In portrait, the device's natural orientation applies directly
+                    SensorManager.getOrientation(R, orientation);
+                } else {
+                    // In landscape, remap axes: device X -> world Y, device Y -> world -X
+                    float[] remappedR = new float[9];
+                    SensorManager.remapCoordinateSystem(R, SensorManager.AXIS_Y, SensorManager.AXIS_MINUS_X, remappedR);
+                    SensorManager.getOrientation(remappedR, orientation);
+                }
+
                 float pitch = orientation[1];
                 float roll = orientation[2];
-
 
                 double diffRoll = 0.6;
                 double diffPitch = 0.2;
 
-
+                // Roll check: device tilted too low (pointing at ground) or too high (pointing at sky)
                 double valueRoll = 1.25;
                 if ((abs(roll) <= valueRoll) && (newMillis > millis + 1500)) {
                     float t = (150 / (abs(roll)) - 20);
@@ -407,6 +460,7 @@ public class LdActivity extends Activity implements CvCameraViewListener2, Senso
                     }
                 }
 
+                // Pitch check: device tilted left or right
                 double valuePitch = 0;
                 if (((pitch <= valuePitch - diffPitch)) && (newMillis > millis + 1500)) {
                     float t = ((abs(pitch) * 1000) - 50);

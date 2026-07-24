@@ -7,4 +7,10 @@
     <string name="minneighbours">MinNeighbours</string>
     <string name="Frames">Dauer bis zur Erkennung</string>
     <string name="help">\?</string>
+
+    <!-- Themes -->
+    <style name="AppTheme.Fullscreen" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+    </style>
 </resources>
