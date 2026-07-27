@@ -31,7 +31,6 @@ import android.widget.Toast;
 
 import com.google.common.util.concurrent.ListenableFuture;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.List;
@@ -89,6 +88,7 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
     private ExecutorService analysisExecutor;
 
     private volatile boolean detecting = false;
+    private volatile boolean released = false;
 
     private final String helpText = "Halten Sie das Handy hoch oder quer und richten Sie die Kamera auf die Ampel. " +
             "Falls Sie das Handy falsch halten wird es vibrieren und eine Sprachnachricht wird abgespielt.\n" +
@@ -148,8 +148,9 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
         try {
             detector = TFLiteDetector.create(
                     getAssets(), TF_MODEL_FILE, TF_LABELS_FILE, TF_INPUT_SIZE, TF_IS_QUANTIZED);
-        } catch (IOException e) {
+        } catch (Exception e) {
             Log.e(TAG, "Failed to initialize TFLite detector", e);
+            detector = null;
             Toast.makeText(this, "Der Classifier konnte nicht initialisiert werden!", Toast.LENGTH_LONG).show();
         }
 
@@ -201,8 +202,26 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        if (analysisExecutor != null) analysisExecutor.shutdown();
-        if (detector != null) detector.close();
+        // Mark released so any in-flight frame analysis bails out early.
+        released = true;
+        // Shut the executor down and WAIT for the current inference to finish
+        // before closing the native TFLite interpreter, otherwise we risk a
+        // native crash (use-after-free) when closing during recognizeImage().
+        if (analysisExecutor != null) {
+            analysisExecutor.shutdown();
+            try {
+                if (!analysisExecutor.awaitTermination(2, java.util.concurrent.TimeUnit.SECONDS)) {
+                    analysisExecutor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                analysisExecutor.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
+        if (detector != null) {
+            detector.close();
+            detector = null;
+        }
     }
 
     private void startCamera() {
@@ -238,7 +257,7 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
      * Runs on the analysis executor thread.
      */
     private void analyzeFrame(@NonNull ImageProxy image) {
-        if (detector == null || detecting) {
+        if (released || detector == null || detecting) {
             image.close();
             return;
         }
@@ -256,17 +275,37 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
         }
 
         detecting = true;
+        Bitmap fullBitmap = null;
+        Bitmap cropped = null;
+        Bitmap modelInput = null;
         try {
             int width = image.getWidth();
             int height = image.getHeight();
 
-            // CameraX RGBA_8888: single plane. Build a Bitmap from it.
-            Bitmap fullBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
-            fullBitmap.copyPixelsFromBuffer(image.getPlanes()[0].getBuffer());
+            // CameraX RGBA_8888: single plane, but rows may be padded.
+            // Account for the row stride so the image is not sheared.
+            ImageProxy.PlaneProxy plane = image.getPlanes()[0];
+            int pixelStride = plane.getPixelStride();
+            int rowStride = plane.getRowStride();
+            int rowPadding = rowStride - pixelStride * width;
+            int paddedWidth = width + rowPadding / pixelStride;
+
+            fullBitmap = Bitmap.createBitmap(paddedWidth, height, Bitmap.Config.ARGB_8888);
+            fullBitmap.copyPixelsFromBuffer(plane.getBuffer());
+
+            // Drop the padding columns if present
+            if (paddedWidth != width) {
+                cropped = Bitmap.createBitmap(fullBitmap, 0, 0, width, height);
+            } else {
+                cropped = fullBitmap;
+            }
 
             // Scale to the model input size (300x300)
-            Bitmap modelInput = Bitmap.createScaledBitmap(fullBitmap, TF_INPUT_SIZE, TF_INPUT_SIZE, true);
+            modelInput = Bitmap.createScaledBitmap(cropped, TF_INPUT_SIZE, TF_INPUT_SIZE, true);
 
+            if (released || detector == null) {
+                return;
+            }
             List<Classifier.Recognition> results = detector.recognizeImage(modelInput);
 
             // Filter by confidence, keep detections in model-input coordinates
@@ -310,12 +349,13 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
             }
             overlayView.setDetections(greenRects, redRects, TF_INPUT_SIZE, TF_INPUT_SIZE);
 
-            fullBitmap.recycle();
-            if (modelInput != fullBitmap) modelInput.recycle();
-
         } catch (Exception e) {
             Log.e(TAG, "Error analyzing frame", e);
         } finally {
+            // Recycle bitmaps (guard against the shared-instance cases)
+            if (modelInput != null && modelInput != cropped) modelInput.recycle();
+            if (cropped != null && cropped != fullBitmap) cropped.recycle();
+            if (fullBitmap != null) fullBitmap.recycle();
             detecting = false;
             image.close();
         }

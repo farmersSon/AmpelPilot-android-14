@@ -30,7 +30,8 @@
 
         <activity
             android:name=".LdActivity"
-            android:exported="false" />
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden" />
 
         <activity
             android:name=".SplashScreen"
