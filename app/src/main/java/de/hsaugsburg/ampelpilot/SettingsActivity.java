@@ -12,36 +12,32 @@ import android.widget.TextView;
 
 import androidx.appcompat.app.AppCompatActivity;
 
+/**
+ * Settings screen. Lets the user adjust the detection stability window - how many
+ * consecutive frames must agree on a light phase before it is announced. A higher
+ * value is more reliable but slower to react; a lower value reacts faster but may
+ * produce more false positives.
+ */
 public class SettingsActivity extends AppCompatActivity {
 
-    private TextView text_Frames;
-    private TextView text_Scale;
-    private TextView text_MinN;
-    private SeekBar seekBar_Frames;
-    private SeekBar seekBar_MinN;
-    private SeekBar seekBar_Scale;
+    private static final int START_VALUE_FRAMES = 1;
 
-    private int startValue_Frames = 3;
-    private int startValue_Scale = 1;
-    private int startValue_MinN = 3;
+    private TextView textFrames;
+    private SeekBar seekBarFrames;
 
-    private String helpText = "Bitte halten Sie das Handy im Landschaftsmodus und halten Sie die Kamera Richtung Fußgängerampel.\n" +
+    private final String helpText = "AmpelPilot erkennt rote und gr\u00fcne Fu\u00dfg\u00e4ngerampeln \u00fcber die Kamera " +
+            "und teilt Ihnen per Sprachausgabe und Vibration mit, welche Phase aktiv ist.\n" +
             "\n" +
-            "Um die Fußgängerampel wird ein roter oder grüner Kasten gezeichnet und " +
-            "eine Stimme teilt Ihnen mit, ob die Fußgängerampel rot oder grün ist.\n" +
+            "Halten Sie das Handy hoch oder quer und richten Sie die Kamera auf die Ampel.\n" +
             "\n" +
-            "Falls Sie das Handy falsch halten, wird es vibrieren und eine Sprachnachricht abspielen.\n" +
-            "\n" +
-            "In den Settings können Sie die Werte zur Erkennung umstellen. ";
+            "Benutzen Sie diese App nur als zus\u00e4tzliche Hilfe! Verlassen Sie sich stets auf Ihre eigene Wahrnehmung!";
 
-    private String helpTextScale = "Standard Wert: 2\n" + "\nJe kleiner der Wert ist, umso genauer wird nach einer Fußgängerampel gesucht.\n"
-            + "Allerdings wird die App dadurch langsamer.";
+    private final String helpTextFrames = "Legt fest, wie viele aufeinanderfolgende Kamerabilder die gleiche " +
+            "Ampelphase zeigen m\u00fcssen, bevor sie angesagt wird.\n" +
+            "\nEin h\u00f6herer Wert ist zuverl\u00e4ssiger, reagiert aber langsamer.\n" +
+            "Ein niedrigerer Wert reagiert schneller, kann aber mehr Fehlerkennungen ausl\u00f6sen.\n" +
+            "\nStandard: 4";
 
-    private String helpTextMinN = "Standard Wert: 5\n" + "\nJe größer der Wert ist, umso genauer muss die App eine Fußgängerampel erkennen.\n"
-            + "";
-
-    private String helpTextFrames = "Standard Wert: 5\n" + "\nWert gibt an, wie oft eine Fußgängerampel erkannt werden muss," +
-            " bevor ein akustisches Signal ausgegeben wird.\n";
     private SharedPreferences prefs;
     private SharedPreferences.Editor editor;
 
@@ -50,35 +46,19 @@ public class SettingsActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_settings);
 
-        prefs = this.getSharedPreferences(
-                "de.hsaugsburg.ampelpilot", Context.MODE_PRIVATE);
+        prefs = getSharedPreferences("de.hsaugsburg.ampelpilot", Context.MODE_PRIVATE);
         editor = prefs.edit();
 
-        seekBar_Frames = (SeekBar) findViewById(R.id.seekBar_Frames);
-        seekBar_Scale = (SeekBar) findViewById(R.id.seekBar_Scale);
-        seekBar_MinN = (SeekBar) findViewById(R.id.seekBar_MinN);
+        seekBarFrames = findViewById(R.id.seekBar_Frames);
+        textFrames = findViewById(R.id.text_Frames);
 
-        seekBar_Frames.setProgress(prefs.getInt("Frames", 7) - startValue_Frames);
-        seekBar_Scale.setProgress((int) ((prefs.getFloat("Scale", 2) - startValue_Scale) * 10));
-        seekBar_MinN.setProgress(prefs.getInt("MinN", 5) - startValue_MinN);
+        seekBarFrames.setProgress(prefs.getInt("Frames", 4) - START_VALUE_FRAMES);
+        updateFramesText(seekBarFrames.getProgress());
 
-        text_Frames = (TextView) findViewById(R.id.text_Frames);
-        text_Scale = (TextView) findViewById(R.id.text_Scale);
-        text_MinN = (TextView) findViewById(R.id.text_MinN);
-
-        text_Frames.setText(getString(R.string.Text_SeekBar) + String.valueOf(seekBar_Frames.getProgress() + startValue_Frames));
-        text_Scale.setText(getString(R.string.Text_SeekBar) +
-                (roundFloat(getConvertedValue(seekBar_Scale.getProgress()), 2) + startValue_Scale));
-        text_MinN.setText(getString(R.string.Text_SeekBar) + String.valueOf(seekBar_MinN.getProgress() + startValue_MinN));
-
-        seekBar_Scale.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-
+        seekBarFrames.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                if (progress == 0) {
-                    progress = 1;
-                }
-                text_Scale.setText(getString(R.string.Text_SeekBar) + roundFloat(getConvertedValue(progress) + startValue_Scale, 2));
+                updateFramesText(progress);
             }
 
             @Override
@@ -90,115 +70,38 @@ public class SettingsActivity extends AppCompatActivity {
             }
         });
 
-        seekBar_Frames.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-
-            @Override
-            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                text_Frames.setText(getString(R.string.Text_SeekBar) + String.valueOf(progress + startValue_Frames));
-            }
-
-            @Override
-            public void onStartTrackingTouch(SeekBar seekBar) {
-            }
-
-            @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {
-            }
+        Button btnGo = findViewById(R.id.btnGo);
+        btnGo.setOnClickListener(v -> {
+            editor.putInt("Frames", seekBarFrames.getProgress() + START_VALUE_FRAMES);
+            editor.apply();
+            startActivity(new Intent(getApplicationContext(), LdActivity.class));
+            finish();
         });
 
-        seekBar_MinN.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+        Button btnHelp = findViewById(R.id.btnHelp);
+        btnHelp.setOnClickListener(v -> showDialog("Hilfe zu Ampel-Pilot", helpText));
 
-            @Override
-            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                text_MinN.setText(getString(R.string.Text_SeekBar) + String.valueOf(progress + startValue_MinN));
-            }
+        Button btnHelpFrames = findViewById(R.id.helpButtonFrames);
+        btnHelpFrames.setOnClickListener(v -> showDialog("Dauer bis zur Erkennung", helpTextFrames));
+    }
 
-            @Override
-            public void onStartTrackingTouch(SeekBar seekBar) {
-            }
+    private void updateFramesText(int progress) {
+        int value = progress + START_VALUE_FRAMES;
+        textFrames.setText(getString(R.string.Text_SeekBar) + value);
+    }
 
-            @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {
-            }
-        });
-
-        Button btnGo = (Button) findViewById(R.id.btnGo);
-        btnGo.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View arg0) {
-                Intent nextScreen = new Intent(getApplicationContext(), LdActivity.class);
-                editor.putFloat("Scale", roundFloat(getConvertedValue(seekBar_Scale.getProgress()) + startValue_Scale, 2));
-                editor.putInt("Frames", seekBar_Frames.getProgress() + startValue_Frames);
-                editor.putInt("MinN", seekBar_MinN.getProgress() + startValue_MinN);
-                editor.commit();
-                startActivity(nextScreen);
-                finish();
-            }
-        });
-
-        Button btnHelp = (Button) findViewById(R.id.btnHelp);
-        btnHelp.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View arg0) {
-                AlertDialog.Builder dlgAlert = new AlertDialog.Builder(SettingsActivity.this);
-                dlgAlert.setMessage(helpText);
-                dlgAlert.setTitle("Hilfe zu Ampel-Pilot");
-                dlgAlert.setPositiveButton("OK", null);
-                dlgAlert.setCancelable(true);
-                dlgAlert.create().show();
-            }
-        });
-
-        Button btnHelpFrames = (Button) findViewById(R.id.helpButtonFrames);
-        btnHelpFrames.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View arg0) {
-                AlertDialog.Builder dlgAlert = new AlertDialog.Builder(SettingsActivity.this);
-                dlgAlert.setMessage(helpTextFrames);
-                dlgAlert.setTitle("Frames");
-                dlgAlert.setPositiveButton("OK", null);
-                dlgAlert.setCancelable(true);
-                dlgAlert.create().show();
-            }
-        });
-
-        Button btnHelpMinN = (Button) findViewById(R.id.helpButtonMinN);
-        btnHelpMinN.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View arg0) {
-                AlertDialog.Builder dlgAlert = new AlertDialog.Builder(SettingsActivity.this);
-                dlgAlert.setMessage(helpTextMinN);
-                dlgAlert.setTitle("MinNeighbours");
-                dlgAlert.setPositiveButton("OK", null);
-                dlgAlert.setCancelable(true);
-                dlgAlert.create().show();
-            }
-        });
-
-        Button btnHelpScale = (Button) findViewById(R.id.helpButtonScale);
-        btnHelpScale.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View arg0) {
-                AlertDialog.Builder dlgAlert = new AlertDialog.Builder(SettingsActivity.this);
-                dlgAlert.setMessage(helpTextScale);
-                dlgAlert.setTitle("ScaleFactor");
-                dlgAlert.setPositiveButton("OK", null);
-                dlgAlert.setCancelable(true);
-                dlgAlert.create().show();
-            }
-        });
+    private void showDialog(String title, String message) {
+        new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setMessage(message)
+                .setPositiveButton("OK", null)
+                .setCancelable(true)
+                .show();
     }
 
     @Override
     public void onBackPressed() {
         super.onBackPressed();
         finish();
-    }
-
-    private float roundFloat(final float number, final int decimalPlaces) {
-        float precision = 1.0F;
-        for (int i = 0; i < decimalPlaces; i++, precision *= 10) ;
-        return ((int) (number * precision + 0.5) / precision);
-    }
-
-    public float getConvertedValue(int intVal) {
-        float floatVal = 0.0f;
-        floatVal = 0.1f * intVal;
-        return floatVal;
     }
 }

@@ -1,11 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">AmpelPilot</string>
-    <string name="settings">Settings</string>
-    <string name="Text_SeekBar">Aktueller Wert ist:</string>
-    <string name="scalefactor">ScaleFactor</string>
-    <string name="minneighbours">MinNeighbours</string>
+    <string name="settings">Einstellungen</string>
+    <string name="Text_SeekBar">Aktueller Wert ist: </string>
     <string name="Frames">Dauer bis zur Erkennung</string>
+    <string name="stability">Dauer bis zur Erkennung</string>
     <string name="help">\?</string>
 
     <!-- Themes -->
