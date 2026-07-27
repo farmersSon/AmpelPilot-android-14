@@ -16,4 +16,3 @@ dependencyResolutionManagement {
 
 rootProject.name = "AmpelPilot"
 include ':app'
-include ':opencv'

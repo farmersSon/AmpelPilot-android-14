@@ -14,6 +14,7 @@ import androidx.core.content.ContextCompat;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.graphics.Bitmap;
 import android.graphics.RectF;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
@@ -26,54 +27,57 @@ import android.os.Vibrator;
 import android.os.VibratorManager;
 import android.speech.tts.TextToSpeech;
 import android.util.Log;
-import android.view.View;
-import android.view.WindowManager;
 import android.widget.Toast;
 
 import com.google.common.util.concurrent.ListenableFuture;
 
-import org.opencv.android.OpenCVLoader;
-import org.opencv.core.CvType;
-import org.opencv.core.Mat;
-import org.opencv.core.MatOfRect;
-import org.opencv.core.Rect;
-import org.opencv.core.Size;
-import org.opencv.imgproc.Imgproc;
-import org.opencv.objdetect.CascadeClassifier;
-
-import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+/**
+ * Main detection activity. Uses CameraX for the camera pipeline and a TensorFlow Lite
+ * object detection model (SSD MobileNet) to detect pedestrian traffic light phases.
+ * Provides audio (TTS) and vibration feedback, plus sensor-based tilt guidance to help
+ * visually impaired users aim the camera.
+ */
 public class LdActivity extends AppCompatActivity implements SensorEventListener {
 
     private static final String TAG = "AmpelPilot::LdActivity";
 
+    // TFLite model configuration
+    private static final int TF_INPUT_SIZE = 300;
+    private static final boolean TF_IS_QUANTIZED = false;
+    private static final String TF_MODEL_FILE = "detect.tflite";
+    private static final String TF_LABELS_FILE = "labelmap.txt";
+    private static final float MIN_CONFIDENCE = 0.6f;
+
+    private Classifier detector;
+
+    // Sensor / feedback
     private SensorManager mSensorManager;
     private Sensor accelerometer;
     private Sensor magnetometer;
     private Vibrator v;
-
-    private LightPeriod lightgreen = new LightPeriod();
-    private LightPeriod lightred = new LightPeriod();
-    private long systemTime = System.currentTimeMillis();
     private TextToSpeech tts;
-
-    private CascadeClassifier mJavaDetectorGreen;
-    private CascadeClassifier mJavaDetectorRed;
 
     private float[] mGravity;
     private float[] mGeomagnetic;
 
-    private double scaleFactor;
-    private int minNeighbours;
+    // Stability detection - rolling buffer of recent detections
+    private final LinkedList<String> recentResults = new LinkedList<>();
+    private int stabilityWindow = 4;
+    private long lastAnnounceTime = 0;
+    private long tiltFeedbackTime = 0;
+    private long tiltMillis = System.currentTimeMillis();
+
+    // Vibration patterns
+    private final long[] redPattern = {0, 200, 300, 200, 300, 200};
+    private final int greenDuration = 1000;
 
     private SharedPreferences prefs;
 
@@ -81,27 +85,21 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
     private DetectionOverlayView overlayView;
     private ExecutorService analysisExecutor;
 
-    private long millis = System.currentTimeMillis();
+    private volatile boolean detecting = false;
 
-    private String helpText = "Halten Sie das Handy hoch oder quer und richten Sie die Kamera auf die Ampel. " +
+    private final String helpText = "Halten Sie das Handy hoch oder quer und richten Sie die Kamera auf die Ampel. " +
             "Falls Sie das Handy falsch halten wird es vibrieren und eine Sprachnachricht wird abgespielt.\n" +
             "\n" +
-            "In den Settings k\u00f6nnen Sie die Werte zur Erkennung umstellen.\n" +
+            "Benutzen Sie diese App nur als zus\u00e4tzliche Hilfe! Verlassen Sie sich stets auf Ihre eigene Wahrnehmung!\n" +
             "\n" +
             "Der Anbieter dieser App \u00fcbernimmt keine Haftung f\u00fcr Sach- und Personensch\u00e4den, " +
             "welche durch die Nutzung von \u201eAmpel-Pilot\u201c entstehen.";
-
-    static {
-        OpenCVLoader.initDebug();
-    }
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
         prefs = getSharedPreferences("de.hsaugsburg.ampelpilot", Context.MODE_PRIVATE);
-
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         if (prefs.getBoolean("firstStart", true)) {
             prefs.edit().putBoolean("firstStart", false).apply();
@@ -118,15 +116,16 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
         previewView = findViewById(R.id.camera_preview);
         overlayView = findViewById(R.id.detection_overlay);
 
-        // Sensor setup
+        // Keep screen on during detection
+        getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
+        // Sensors for tilt guidance
         mSensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
         accelerometer = mSensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
         magnetometer = mSensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD);
 
-        // Detection parameters
-        minNeighbours = prefs.getInt("MinN", 5);
-        scaleFactor = prefs.getFloat("Scale", 2);
-        lightgreen.setAmountint(prefs.getInt("Frames", 7));
+        // Stability window read from prefs ("Frames" from the settings screen)
+        stabilityWindow = Math.max(1, prefs.getInt("Frames", 4));
 
         // Vibrator
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -142,13 +141,17 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
             finish();
         });
 
-        // Load cascade classifiers
-        loadCascadeClassifiers();
+        // Load the TFLite detector
+        try {
+            detector = TFLiteDetector.create(
+                    getAssets(), TF_MODEL_FILE, TF_LABELS_FILE, TF_INPUT_SIZE, TF_IS_QUANTIZED);
+        } catch (IOException e) {
+            Log.e(TAG, "Failed to initialize TFLite detector", e);
+            Toast.makeText(this, "Der Classifier konnte nicht initialisiert werden!", Toast.LENGTH_LONG).show();
+        }
 
-        // Analysis executor (single thread for frame processing)
         analysisExecutor = Executors.newSingleThreadExecutor();
 
-        // Start camera
         startCamera();
     }
 
@@ -191,62 +194,15 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        if (analysisExecutor != null) {
-            analysisExecutor.shutdown();
-        }
-    }
-
-    private void loadCascadeClassifiers() {
-        try {
-            File cascadeDir = getDir("cascade", Context.MODE_PRIVATE);
-
-            // Green classifier
-            InputStream is = getResources().openRawResource(R.raw.green);
-            File cascadeFileGreen = new File(cascadeDir, "cascade_green.xml");
-            copyStreamToFile(is, cascadeFileGreen);
-            is.close();
-
-            mJavaDetectorGreen = new CascadeClassifier(cascadeFileGreen.getAbsolutePath());
-            if (mJavaDetectorGreen.empty()) {
-                Log.e(TAG, "Failed to load green cascade classifier");
-                mJavaDetectorGreen = null;
-            }
-
-            // Red classifier
-            InputStream ise = getResources().openRawResource(R.raw.red);
-            File cascadeFileRed = new File(cascadeDir, "cascade_red.xml");
-            copyStreamToFile(ise, cascadeFileRed);
-            ise.close();
-
-            mJavaDetectorRed = new CascadeClassifier(cascadeFileRed.getAbsolutePath());
-            if (mJavaDetectorRed.empty()) {
-                Log.e(TAG, "Failed to load red cascade classifier");
-                mJavaDetectorRed = null;
-            }
-
-        } catch (IOException e) {
-            Log.e(TAG, "Failed to load cascade classifiers", e);
-        }
-    }
-
-    private void copyStreamToFile(InputStream is, File outFile) throws IOException {
-        FileOutputStream os = new FileOutputStream(outFile);
-        byte[] buffer = new byte[4096];
-        int bytesRead;
-        while ((bytesRead = is.read(buffer)) != -1) {
-            os.write(buffer, 0, bytesRead);
-        }
-        os.close();
+        if (analysisExecutor != null) analysisExecutor.shutdown();
+        if (detector != null) detector.close();
     }
 
     private void startCamera() {
-        ListenableFuture<ProcessCameraProvider> cameraProviderFuture =
-                ProcessCameraProvider.getInstance(this);
-
-        cameraProviderFuture.addListener(() -> {
+        ListenableFuture<ProcessCameraProvider> future = ProcessCameraProvider.getInstance(this);
+        future.addListener(() -> {
             try {
-                ProcessCameraProvider cameraProvider = cameraProviderFuture.get();
-                bindCameraUseCases(cameraProvider);
+                bindCameraUseCases(future.get());
             } catch (Exception e) {
                 Log.e(TAG, "Camera initialization failed", e);
                 Toast.makeText(this, "Kamera konnte nicht gestartet werden", Toast.LENGTH_LONG).show();
@@ -255,11 +211,9 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
     }
 
     private void bindCameraUseCases(ProcessCameraProvider cameraProvider) {
-        // Preview
         Preview preview = new Preview.Builder().build();
         preview.setSurfaceProvider(previewView.getSurfaceProvider());
 
-        // Image Analysis
         ImageAnalysis imageAnalysis = new ImageAnalysis.Builder()
                 .setTargetResolution(new android.util.Size(640, 480))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -268,110 +222,117 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
 
         imageAnalysis.setAnalyzer(analysisExecutor, this::analyzeFrame);
 
-        // Select back camera
-        CameraSelector cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA;
-
-        // Unbind all and rebind
         cameraProvider.unbindAll();
-        cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageAnalysis);
+        cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageAnalysis);
     }
 
     /**
-     * Process each camera frame for traffic light detection.
+     * Analyze a single camera frame: run TFLite detection and provide feedback.
      * Runs on the analysis executor thread.
      */
     private void analyzeFrame(@NonNull ImageProxy image) {
+        if (detector == null || detecting) {
+            image.close();
+            return;
+        }
+        detecting = true;
         try {
             int width = image.getWidth();
             int height = image.getHeight();
 
-            // Get RGBA data from the image
-            ByteBuffer buffer = image.getPlanes()[0].getBuffer();
-            int rowStride = image.getPlanes()[0].getRowStride();
-            int pixelStride = image.getPlanes()[0].getPixelStride();
+            // CameraX RGBA_8888: single plane. Build a Bitmap from it.
+            Bitmap fullBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+            fullBitmap.copyPixelsFromBuffer(image.getPlanes()[0].getBuffer());
 
-            // Create OpenCV Mat from RGBA buffer
-            Mat rgba = new Mat(height, width, CvType.CV_8UC4);
-            byte[] data = new byte[buffer.remaining()];
-            buffer.get(data);
+            // Scale to the model input size (300x300)
+            Bitmap modelInput = Bitmap.createScaledBitmap(fullBitmap, TF_INPUT_SIZE, TF_INPUT_SIZE, true);
 
-            // Handle row stride padding if needed
-            if (rowStride == width * pixelStride) {
-                rgba.put(0, 0, data);
-            } else {
-                // Copy row by row to handle stride
-                for (int row = 0; row < height; row++) {
-                    int offset = row * rowStride;
-                    byte[] rowData = new byte[width * pixelStride];
-                    System.arraycopy(data, offset, rowData, 0, width * pixelStride);
-                    rgba.row(row).put(0, 0, rowData);
+            List<Classifier.Recognition> results = detector.recognizeImage(modelInput);
+
+            // Filter by confidence, keep detections in model-input coordinates
+            List<Classifier.Recognition> valid = new ArrayList<>();
+            for (Classifier.Recognition r : results) {
+                if (r.getLocation() != null && r.getConfidence() != null
+                        && r.getConfidence() >= MIN_CONFIDENCE) {
+                    valid.add(r);
                 }
             }
 
-            // Apply zoom crop (same as original)
-            float zoom = 0.6f;
-            int offx = (int) (0.5 * (1.0 - zoom) * width);
-            int offy = (int) (0.5 * (1.0 - zoom) * height);
-            Mat cropped = rgba.submat(offy, height - offy, offx, width - offx);
-
-            Size croppedSize = cropped.size();
-            Mat resized = new Mat();
-            Imgproc.resize(cropped, resized, new Size(width, height));
-
-            // Run detection
-            MatOfRect greenDetections = new MatOfRect();
-            MatOfRect redDetections = new MatOfRect();
-
-            if (mJavaDetectorGreen != null) {
-                mJavaDetectorGreen.detectMultiScale(resized, greenDetections, scaleFactor, minNeighbours, 0,
-                        new Size(20, 40), new Size(200, 400));
-            }
-            if (mJavaDetectorRed != null) {
-                mJavaDetectorRed.detectMultiScale(resized, redDetections, scaleFactor, minNeighbours, 0,
-                        new Size(20, 40), new Size(200, 400));
+            // Determine the biggest (closest) detection
+            Classifier.Recognition biggest = biggestRecognition(valid);
+            String currentLight = "none";
+            if (biggest != null) {
+                currentLight = biggest.getTitle();
             }
 
-            // Process red detections
-            Rect[] redArray = redDetections.toArray();
-            lightred.addpoint(redArray);
-            if (lightred.checklight()) {
-                if ((System.currentTimeMillis() - systemTime) > 2000) {
-                    speak("Warte!");
-                    systemTime = System.currentTimeMillis();
+            // Rolling stability buffer
+            recentResults.add(currentLight);
+            while (recentResults.size() > stabilityWindow) {
+                recentResults.removeFirst();
+            }
+
+            if (biggest != null && isStable()) {
+                if (System.currentTimeMillis() - lastAnnounceTime >= 1500) {
+                    lastAnnounceTime = System.currentTimeMillis();
+                    provideFeedback(currentLight);
                 }
             }
 
-            // Process green detections
-            Rect[] greenArray = greenDetections.toArray();
-            lightgreen.addpoint(greenArray);
-            if (lightgreen.checklight()) {
-                if ((System.currentTimeMillis() - systemTime) > 2000) {
-                    speak("Es ist Gr\u00fcn");
-                    systemTime = System.currentTimeMillis();
-                }
-            }
-
-            // Convert detection rects to overlay coordinates
+            // Build overlay rectangles (in model-input coordinate space, 300x300)
             List<RectF> greenRects = new ArrayList<>();
-            for (Rect r : greenArray) {
-                greenRects.add(new RectF((float) r.x, (float) r.y,
-                        (float) (r.x + r.width), (float) (r.y + r.height)));
-            }
             List<RectF> redRects = new ArrayList<>();
-            for (Rect r : redArray) {
-                redRects.add(new RectF((float) r.x, (float) r.y,
-                        (float) (r.x + r.width), (float) (r.y + r.height)));
+            for (Classifier.Recognition r : valid) {
+                if ("green".equals(r.getTitle())) {
+                    greenRects.add(r.getLocation());
+                } else if ("red".equals(r.getTitle())) {
+                    redRects.add(r.getLocation());
+                }
             }
+            overlayView.setDetections(greenRects, redRects, TF_INPUT_SIZE, TF_INPUT_SIZE);
 
-            // Update overlay on UI thread
-            overlayView.setDetections(greenRects, redRects, width, height);
+            fullBitmap.recycle();
+            if (modelInput != fullBitmap) modelInput.recycle();
 
-            // Release mats
-            rgba.release();
-            resized.release();
-
+        } catch (Exception e) {
+            Log.e(TAG, "Error analyzing frame", e);
         } finally {
+            detecting = false;
             image.close();
+        }
+    }
+
+    /** All entries in the rolling buffer are the same non-"none" phase. */
+    private boolean isStable() {
+        if (recentResults.size() < stabilityWindow) return false;
+        String first = recentResults.getFirst();
+        if ("none".equals(first)) return false;
+        for (String s : recentResults) {
+            if (!s.equals(first)) return false;
+        }
+        return true;
+    }
+
+    private Classifier.Recognition biggestRecognition(List<Classifier.Recognition> recognitions) {
+        Classifier.Recognition biggest = null;
+        double biggestArea = 0.0;
+        for (Classifier.Recognition r : recognitions) {
+            RectF loc = r.getLocation();
+            double area = loc.width() * loc.height();
+            if (area > biggestArea) {
+                biggestArea = area;
+                biggest = r;
+            }
+        }
+        return biggest;
+    }
+
+    private void provideFeedback(String lightPhase) {
+        if ("red".equals(lightPhase)) {
+            vibratePattern(redPattern);
+            speak("Es ist rot");
+        } else if ("green".equals(lightPhase)) {
+            vibrateOnce(greenDuration);
+            speak("Es ist gr\u00fcn");
         }
     }
 
@@ -381,7 +342,7 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
         }
     }
 
-    // ---- Sensor tilt detection (same logic as original) ----
+    // ---- Sensor tilt guidance (accessibility aid for aiming the camera) ----
 
     @Override
     public void onSensorChanged(SensorEvent event) {
@@ -393,11 +354,10 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
             mGeomagnetic = event.values;
 
         if (mGravity != null && mGeomagnetic != null) {
-            float R[] = new float[9];
-            float I[] = new float[9];
-            boolean success = SensorManager.getRotationMatrix(R, I, mGravity, mGeomagnetic);
-            if (success) {
-                float orientation[] = new float[3];
+            float[] R = new float[9];
+            float[] I = new float[9];
+            if (SensorManager.getRotationMatrix(R, I, mGravity, mGeomagnetic)) {
+                float[] orientation = new float[3];
                 SensorManager.getOrientation(R, orientation);
                 float pitch = orientation[1];
                 float roll = orientation[2];
@@ -406,48 +366,39 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
                 double diffPitch = 0.2;
                 double valueRoll = 1.25;
 
-                // Roll too low (pointing at ground)
-                if ((abs(roll) <= valueRoll) && (newMillis > millis + 1500)) {
-                    float t = (150 / (abs(roll)) - 20);
-                    vibrate(t);
-                    millis = newMillis;
-                    if ((System.currentTimeMillis() - systemTime) > 3000) {
+                if ((abs(roll) <= valueRoll) && (newMillis > tiltMillis + 1500)) {
+                    vibrateOnce((long) (150 / (abs(roll)) - 20));
+                    tiltMillis = newMillis;
+                    if (System.currentTimeMillis() - tiltFeedbackTime > 3000) {
                         speak("Winkel zu Niedrig");
-                        systemTime = System.currentTimeMillis();
+                        tiltFeedbackTime = System.currentTimeMillis();
                     }
                 }
 
-                // Roll too high (pointing at sky)
-                if ((abs(roll) >= valueRoll + diffRoll) && (newMillis > millis + 1500)) {
-                    float t = ((abs(roll) * 100) - 50);
-                    vibrate(t);
-                    millis = newMillis;
-                    if ((System.currentTimeMillis() - systemTime) > 3000) {
+                if ((abs(roll) >= valueRoll + diffRoll) && (newMillis > tiltMillis + 1500)) {
+                    vibrateOnce((long) ((abs(roll) * 100) - 50));
+                    tiltMillis = newMillis;
+                    if (System.currentTimeMillis() - tiltFeedbackTime > 3000) {
                         speak("Winkel zu Hoch");
-                        systemTime = System.currentTimeMillis();
+                        tiltFeedbackTime = System.currentTimeMillis();
                     }
                 }
 
-                // Pitch tilted right
                 double valuePitch = 0;
-                if ((pitch <= valuePitch - diffPitch) && (newMillis > millis + 1500)) {
-                    float t = ((abs(pitch) * 1000) - 50);
-                    vibrate(t);
-                    millis = newMillis;
-                    if ((System.currentTimeMillis() - systemTime) > 3000) {
+                if ((pitch <= valuePitch - diffPitch) && (newMillis > tiltMillis + 1500)) {
+                    vibrateOnce((long) ((abs(pitch) * 1000) - 50));
+                    tiltMillis = newMillis;
+                    if (System.currentTimeMillis() - tiltFeedbackTime > 3000) {
                         speak("Zu weit nach rechts geneigt");
-                        systemTime = System.currentTimeMillis();
+                        tiltFeedbackTime = System.currentTimeMillis();
                     }
                 }
-
-                // Pitch tilted left
-                if ((pitch >= valuePitch + diffPitch) && (newMillis > millis + 1500)) {
-                    float t = ((abs(pitch) * 1000) - 50);
-                    vibrate(t);
-                    millis = newMillis;
-                    if ((System.currentTimeMillis() - systemTime) > 3000) {
+                if ((pitch >= valuePitch + diffPitch) && (newMillis > tiltMillis + 1500)) {
+                    vibrateOnce((long) ((abs(pitch) * 1000) - 50));
+                    tiltMillis = newMillis;
+                    if (System.currentTimeMillis() - tiltFeedbackTime > 3000) {
                         speak("Zu weit nach links geneigt");
-                        systemTime = System.currentTimeMillis();
+                        tiltFeedbackTime = System.currentTimeMillis();
                     }
                 }
             }
@@ -458,13 +409,23 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
     public void onAccuracyChanged(Sensor sensor, int accuracy) {
     }
 
-    private void vibrate(float t) {
-        t = Math.min(t, 1000f);
-        if (t <= 0) return;
+    private void vibrateOnce(long duration) {
+        if (duration <= 0) return;
+        duration = Math.min(duration, 1000);
+        if (v == null) return;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            v.vibrate(VibrationEffect.createOneShot((long) t, VibrationEffect.DEFAULT_AMPLITUDE));
+            v.vibrate(VibrationEffect.createOneShot(duration, VibrationEffect.DEFAULT_AMPLITUDE));
         } else {
-            v.vibrate((long) t);
+            v.vibrate(duration);
+        }
+    }
+
+    private void vibratePattern(long[] pattern) {
+        if (v == null) return;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            v.vibrate(VibrationEffect.createWaveform(pattern, -1));
+        } else {
+            v.vibrate(pattern, -1);
         }
     }
 
