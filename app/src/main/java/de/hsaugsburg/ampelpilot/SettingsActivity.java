@@ -11,6 +11,7 @@ import android.widget.SeekBar;
 import android.widget.TextView;
 
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.appcompat.widget.SwitchCompat;
 
 /**
  * Settings screen. Lets the user adjust the detection stability window - how many
@@ -24,6 +25,7 @@ public class SettingsActivity extends AppCompatActivity {
 
     private TextView textFrames;
     private SeekBar seekBarFrames;
+    private SwitchCompat switchTiltPause;
 
     private final String helpText = "AmpelPilot erkennt rote und gr\u00fcne Fu\u00dfg\u00e4ngerampeln \u00fcber die Kamera " +
             "und teilt Ihnen per Sprachausgabe und Vibration mit, welche Phase aktiv ist.\n" +
@@ -51,9 +53,12 @@ public class SettingsActivity extends AppCompatActivity {
 
         seekBarFrames = findViewById(R.id.seekBar_Frames);
         textFrames = findViewById(R.id.text_Frames);
+        switchTiltPause = findViewById(R.id.switch_TiltPause);
 
         seekBarFrames.setProgress(prefs.getInt("Frames", 4) - START_VALUE_FRAMES);
         updateFramesText(seekBarFrames.getProgress());
+
+        switchTiltPause.setChecked(prefs.getBoolean("tilt_pause_inference", false));
 
         seekBarFrames.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
@@ -73,6 +78,7 @@ public class SettingsActivity extends AppCompatActivity {
         Button btnGo = findViewById(R.id.btnGo);
         btnGo.setOnClickListener(v -> {
             editor.putInt("Frames", seekBarFrames.getProgress() + START_VALUE_FRAMES);
+            editor.putBoolean("tilt_pause_inference", switchTiltPause.isChecked());
             editor.apply();
             startActivity(new Intent(getApplicationContext(), LdActivity.class));
             finish();

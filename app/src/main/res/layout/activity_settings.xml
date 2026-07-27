@@ -77,6 +77,36 @@
             android:textColor="@android:color/darker_gray" />
     </LinearLayout>
 
+    <!-- Tilt pause toggle -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingTop="32dp">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/tilt_pause"
+            android:textColor="@android:color/white"
+            android:textSize="22sp" />
+
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/switch_TiltPause"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+    </LinearLayout>
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/tilt_pause_desc"
+        android:textColor="@android:color/darker_gray"
+        android:textSize="14sp"
+        android:paddingTop="4dp" />
+
     <Space
         android:layout_width="match_parent"
         android:layout_height="0dp"

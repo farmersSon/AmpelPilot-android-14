@@ -42,8 +42,8 @@ import java.util.concurrent.Executors;
 /**
  * Main detection activity. Uses CameraX for the camera pipeline and a TensorFlow Lite
  * object detection model (SSD MobileNet) to detect pedestrian traffic light phases.
- * Provides audio (TTS) and vibration feedback, plus sensor-based tilt guidance to help
- * visually impaired users aim the camera.
+ * Provides audio (TTS) and vibration feedback. Optionally pauses detection when the
+ * phone is held flat (facing up/down) to prompt the user to raise the camera.
  */
 public class LdActivity extends AppCompatActivity implements SensorEventListener {
 
@@ -56,24 +56,27 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
     private static final String TF_LABELS_FILE = "labelmap.txt";
     private static final float MIN_CONFIDENCE = 0.6f;
 
+    // Tilt handling: gravity Z above this means the phone is lying nearly flat
+    private static final float FLAT_GRAVITY_Z = 8.0f;
+
     private Classifier detector;
 
     // Sensor / feedback
     private SensorManager mSensorManager;
-    private Sensor accelerometer;
-    private Sensor magnetometer;
+    private Sensor gravitySensor;
     private Vibrator v;
     private TextToSpeech tts;
 
-    private float[] mGravity;
-    private float[] mGeomagnetic;
+    // When enabled, detection pauses while the phone is held flat.
+    // Disabled by default so the app does not nag about the exact angle.
+    private boolean tiltPauseInference = false;
+    private volatile boolean inferenceOn = true;
+    private long holdUpPromptTime = 0;
 
     // Stability detection - rolling buffer of recent detections
     private final LinkedList<String> recentResults = new LinkedList<>();
     private int stabilityWindow = 4;
     private long lastAnnounceTime = 0;
-    private long tiltFeedbackTime = 0;
-    private long tiltMillis = System.currentTimeMillis();
 
     // Vibration patterns
     private final long[] redPattern = {0, 200, 300, 200, 300, 200};
@@ -119,13 +122,13 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
         // Keep screen on during detection
         getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
-        // Sensors for tilt guidance
+        // Gravity sensor for optional "hold the phone up" pause
         mSensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
-        accelerometer = mSensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
-        magnetometer = mSensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD);
+        gravitySensor = mSensorManager.getDefaultSensor(Sensor.TYPE_GRAVITY);
 
-        // Stability window read from prefs ("Frames" from the settings screen)
+        // Read settings
         stabilityWindow = Math.max(1, prefs.getInt("Frames", 4));
+        tiltPauseInference = prefs.getBoolean("tilt_pause_inference", false);
 
         // Vibrator
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -171,8 +174,12 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
     @Override
     protected void onResume() {
         super.onResume();
-        mSensorManager.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_UI);
-        mSensorManager.registerListener(this, magnetometer, SensorManager.SENSOR_DELAY_UI);
+        // Only listen to the gravity sensor when the tilt-pause feature is enabled.
+        if (tiltPauseInference && gravitySensor != null) {
+            mSensorManager.registerListener(this, gravitySensor, SensorManager.SENSOR_DELAY_NORMAL);
+        } else {
+            inferenceOn = true;
+        }
     }
 
     @Override
@@ -235,6 +242,19 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
             image.close();
             return;
         }
+
+        // When tilt-pause is enabled and the phone is flat, skip detection
+        // and gently prompt the user to raise the camera.
+        if (!inferenceOn) {
+            if (System.currentTimeMillis() - holdUpPromptTime >= 7000) {
+                holdUpPromptTime = System.currentTimeMillis();
+                speak("Halten Sie die Kamera bitte hoch!");
+            }
+            overlayView.setDetections(new ArrayList<>(), new ArrayList<>(), TF_INPUT_SIZE, TF_INPUT_SIZE);
+            image.close();
+            return;
+        }
+
         detecting = true;
         try {
             int width = image.getWidth();
@@ -342,66 +362,20 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
         }
     }
 
-    // ---- Sensor tilt guidance (accessibility aid for aiming the camera) ----
+    // ---- Tilt handling (optional): pause detection when the phone is flat ----
 
     @Override
     public void onSensorChanged(SensorEvent event) {
-        long newMillis = System.currentTimeMillis();
+        if (event.sensor.getType() != Sensor.TYPE_GRAVITY) return;
 
-        if (event.sensor.getType() == Sensor.TYPE_ACCELEROMETER)
-            mGravity = event.values;
-        if (event.sensor.getType() == Sensor.TYPE_MAGNETIC_FIELD)
-            mGeomagnetic = event.values;
-
-        if (mGravity != null && mGeomagnetic != null) {
-            float[] R = new float[9];
-            float[] I = new float[9];
-            if (SensorManager.getRotationMatrix(R, I, mGravity, mGeomagnetic)) {
-                float[] orientation = new float[3];
-                SensorManager.getOrientation(R, orientation);
-                float pitch = orientation[1];
-                float roll = orientation[2];
-
-                double diffRoll = 0.6;
-                double diffPitch = 0.2;
-                double valueRoll = 1.25;
-
-                if ((abs(roll) <= valueRoll) && (newMillis > tiltMillis + 1500)) {
-                    vibrateOnce((long) (150 / (abs(roll)) - 20));
-                    tiltMillis = newMillis;
-                    if (System.currentTimeMillis() - tiltFeedbackTime > 3000) {
-                        speak("Winkel zu Niedrig");
-                        tiltFeedbackTime = System.currentTimeMillis();
-                    }
-                }
-
-                if ((abs(roll) >= valueRoll + diffRoll) && (newMillis > tiltMillis + 1500)) {
-                    vibrateOnce((long) ((abs(roll) * 100) - 50));
-                    tiltMillis = newMillis;
-                    if (System.currentTimeMillis() - tiltFeedbackTime > 3000) {
-                        speak("Winkel zu Hoch");
-                        tiltFeedbackTime = System.currentTimeMillis();
-                    }
-                }
-
-                double valuePitch = 0;
-                if ((pitch <= valuePitch - diffPitch) && (newMillis > tiltMillis + 1500)) {
-                    vibrateOnce((long) ((abs(pitch) * 1000) - 50));
-                    tiltMillis = newMillis;
-                    if (System.currentTimeMillis() - tiltFeedbackTime > 3000) {
-                        speak("Zu weit nach rechts geneigt");
-                        tiltFeedbackTime = System.currentTimeMillis();
-                    }
-                }
-                if ((pitch >= valuePitch + diffPitch) && (newMillis > tiltMillis + 1500)) {
-                    vibrateOnce((long) ((abs(pitch) * 1000) - 50));
-                    tiltMillis = newMillis;
-                    if (System.currentTimeMillis() - tiltFeedbackTime > 3000) {
-                        speak("Zu weit nach links geneigt");
-                        tiltFeedbackTime = System.currentTimeMillis();
-                    }
-                }
-            }
+        // event.values[2] is the gravity component along the device's Z axis
+        // (out of the screen). It approaches +9.81 when the phone lies flat,
+        // face-up - i.e. not aimed at anything useful.
+        float z = event.values[2];
+        if (tiltPauseInference && z > FLAT_GRAVITY_Z) {
+            inferenceOn = false;
+        } else {
+            inferenceOn = true;
         }
     }
 
@@ -427,9 +401,5 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
         } else {
             v.vibrate(pattern, -1);
         }
-    }
-
-    private static float abs(float a) {
-        return (a <= 0.0F) ? 0.0F - a : a;
     }
 }

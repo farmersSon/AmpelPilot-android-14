@@ -5,6 +5,8 @@
     <string name="Text_SeekBar">Aktueller Wert ist: </string>
     <string name="Frames">Dauer bis zur Erkennung</string>
     <string name="stability">Dauer bis zur Erkennung</string>
+    <string name="tilt_pause">Erkennung pausieren, wenn flach gehalten</string>
+    <string name="tilt_pause_desc">Wenn aktiviert, wird die Erkennung angehalten, solange das Handy flach gehalten wird, und Sie werden gebeten, die Kamera hochzuhalten.</string>
     <string name="help">\?</string>
 
     <!-- Themes -->
