@@ -26,6 +26,7 @@ public class SettingsActivity extends AppCompatActivity {
     private TextView textFrames;
     private SeekBar seekBarFrames;
     private SwitchCompat switchTiltPause;
+    private SwitchCompat switchTorch;
 
     private final String helpText = "AmpelPilot erkennt rote und gr\u00fcne Fu\u00dfg\u00e4ngerampeln \u00fcber die Kamera " +
             "und teilt Ihnen per Sprachausgabe und Vibration mit, welche Phase aktiv ist.\n" +
@@ -54,11 +55,13 @@ public class SettingsActivity extends AppCompatActivity {
         seekBarFrames = findViewById(R.id.seekBar_Frames);
         textFrames = findViewById(R.id.text_Frames);
         switchTiltPause = findViewById(R.id.switch_TiltPause);
+        switchTorch = findViewById(R.id.switch_Torch);
 
         seekBarFrames.setProgress(prefs.getInt("Frames", 4) - START_VALUE_FRAMES);
         updateFramesText(seekBarFrames.getProgress());
 
         switchTiltPause.setChecked(prefs.getBoolean("tilt_pause_inference", false));
+        switchTorch.setChecked(prefs.getBoolean("use_torch", true));
 
         seekBarFrames.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
@@ -79,6 +82,7 @@ public class SettingsActivity extends AppCompatActivity {
         btnGo.setOnClickListener(v -> {
             editor.putInt("Frames", seekBarFrames.getProgress() + START_VALUE_FRAMES);
             editor.putBoolean("tilt_pause_inference", switchTiltPause.isChecked());
+            editor.putBoolean("use_torch", switchTorch.isChecked());
             editor.apply();
             startActivity(new Intent(getApplicationContext(), LdActivity.class));
             finish();

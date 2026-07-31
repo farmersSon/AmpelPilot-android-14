@@ -3,6 +3,7 @@ package de.hsaugsburg.ampelpilot;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.camera.core.Camera;
 import androidx.camera.core.CameraSelector;
 import androidx.camera.core.ImageAnalysis;
 import androidx.camera.core.ImageProxy;
@@ -87,6 +88,12 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
     private DetectionOverlayView overlayView;
     private ExecutorService analysisExecutor;
 
+    // Camera control (for the torch). The torch is enabled by default because it
+    // forces the auto-exposure to shorten, which keeps the bright red/green LED
+    // colours from being washed out - improving detection. Can be disabled in settings.
+    private Camera camera;
+    private boolean useTorch = true;
+
     private volatile boolean detecting = false;
     private volatile boolean released = false;
 
@@ -129,6 +136,7 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
         // Read settings
         stabilityWindow = Math.max(1, prefs.getInt("Frames", 4));
         tiltPauseInference = prefs.getBoolean("tilt_pause_inference", false);
+        useTorch = prefs.getBoolean("use_torch", true);
 
         // Vibrator
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -240,8 +248,10 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
         Preview preview = new Preview.Builder().build();
         preview.setSurfaceProvider(previewView.getSurfaceProvider());
 
+        // Higher analysis resolution (1280x720) gives the model more detail to work
+        // with before it is scaled down to the model input size.
         ImageAnalysis imageAnalysis = new ImageAnalysis.Builder()
-                .setTargetResolution(new android.util.Size(640, 480))
+                .setTargetResolution(new android.util.Size(1280, 720))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                 .build();
@@ -249,7 +259,27 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
         imageAnalysis.setAnalyzer(analysisExecutor, this::analyzeFrame);
 
         cameraProvider.unbindAll();
-        cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageAnalysis);
+        camera = cameraProvider.bindToLifecycle(
+                this, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageAnalysis);
+
+        applyTorch();
+    }
+
+    /**
+     * Enable/disable the torch based on the user setting. The torch keeps the
+     * auto-exposure short so bright LED colours are not washed out.
+     */
+    private void applyTorch() {
+        if (camera == null) return;
+        try {
+            if (useTorch && camera.getCameraInfo().hasFlashUnit()) {
+                camera.getCameraControl().enableTorch(true);
+            } else {
+                camera.getCameraControl().enableTorch(false);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Could not set torch state", e);
+        }
     }
 
     /**

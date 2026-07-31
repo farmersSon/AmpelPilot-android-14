@@ -7,6 +7,8 @@
     <string name="stability">Dauer bis zur Erkennung</string>
     <string name="tilt_pause">Erkennung pausieren, wenn flach gehalten</string>
     <string name="tilt_pause_desc">Wenn aktiviert, wird die Erkennung angehalten, solange das Handy flach gehalten wird, und Sie werden gebeten, die Kamera hochzuhalten.</string>
+    <string name="torch">Taschenlampe (verbessert Erkennung)</string>
+    <string name="torch_desc">H\u00e4lt die Belichtung kurz, damit die hellen Ampelfarben nicht \u00fcberstrahlt werden. Empfohlen.</string>
     <string name="help">\?</string>
 
     <!-- Themes -->
