@@ -97,6 +97,8 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
     private volatile boolean detecting = false;
     private volatile boolean released = false;
 
+    private DebugLogger logger;
+
     private final String helpText = "Halten Sie das Handy hoch oder quer und richten Sie die Kamera auf die Ampel. " +
             "Falls Sie das Handy falsch halten wird es vibrieren und eine Sprachnachricht wird abgespielt.\n" +
             "\n" +
@@ -110,6 +112,10 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
         super.onCreate(savedInstanceState);
 
         prefs = getSharedPreferences("de.hsaugsburg.ampelpilot", Context.MODE_PRIVATE);
+
+        logger = DebugLogger.get(this);
+        logger.setEnabled(prefs.getBoolean("debug_logging", false));
+        logger.log("LIFECYCLE", "LdActivity onCreate");
 
         if (prefs.getBoolean("firstStart", true)) {
             prefs.edit().putBoolean("firstStart", false).apply();
@@ -137,6 +143,8 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
         stabilityWindow = Math.max(1, prefs.getInt("Frames", 4));
         tiltPauseInference = prefs.getBoolean("tilt_pause_inference", false);
         useTorch = prefs.getBoolean("use_torch", true);
+        logger.log("SETTINGS", "stabilityWindow=" + stabilityWindow
+                + " tiltPause=" + tiltPauseInference + " torch=" + useTorch);
 
         // Vibrator
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -156,8 +164,10 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
         try {
             detector = TFLiteDetector.create(
                     getAssets(), TF_MODEL_FILE, TF_LABELS_FILE, TF_INPUT_SIZE, TF_IS_QUANTIZED);
+            logger.log("MODEL", "TFLite detector loaded (" + TF_MODEL_FILE + ")");
         } catch (Exception e) {
             Log.e(TAG, "Failed to initialize TFLite detector", e);
+            logger.log("MODEL", "Failed to load detector: " + e.getMessage());
             detector = null;
             Toast.makeText(this, "Der Classifier konnte nicht initialisiert werden!", Toast.LENGTH_LONG).show();
         }
@@ -239,6 +249,7 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
                 bindCameraUseCases(future.get());
             } catch (Exception e) {
                 Log.e(TAG, "Camera initialization failed", e);
+                logger.log("CAMERA", "init failed: " + e.getMessage());
                 Toast.makeText(this, "Kamera konnte nicht gestartet werden", Toast.LENGTH_LONG).show();
             }
         }, ContextCompat.getMainExecutor(this));
@@ -274,11 +285,15 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
         try {
             if (useTorch && camera.getCameraInfo().hasFlashUnit()) {
                 camera.getCameraControl().enableTorch(true);
+                logger.log("CAMERA", "torch enabled");
             } else {
                 camera.getCameraControl().enableTorch(false);
+                logger.log("CAMERA", "torch disabled (useTorch=" + useTorch
+                        + " hasFlash=" + camera.getCameraInfo().hasFlashUnit() + ")");
             }
         } catch (Exception e) {
             Log.w(TAG, "Could not set torch state", e);
+            logger.log("CAMERA", "torch error: " + e.getMessage());
         }
     }
 
@@ -420,9 +435,11 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
         if ("red".equals(lightPhase)) {
             vibratePattern(redPattern);
             speak("Es ist rot");
+            logger.log("DETECTION", "stable phase=red -> announce + vibrate");
         } else if ("green".equals(lightPhase)) {
             vibrateOnce(greenDuration);
             speak("Es ist gr\u00fcn");
+            logger.log("DETECTION", "stable phase=green -> announce + vibrate");
         }
     }
 

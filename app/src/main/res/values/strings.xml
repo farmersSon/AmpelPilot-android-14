@@ -9,6 +9,9 @@
     <string name="tilt_pause_desc">Wenn aktiviert, wird die Erkennung angehalten, solange das Handy flach gehalten wird, und Sie werden gebeten, die Kamera hochzuhalten.</string>
     <string name="torch">Taschenlampe (verbessert Erkennung)</string>
     <string name="torch_desc">H\u00e4lt die Belichtung kurz, damit die hellen Ampelfarben nicht \u00fcberstrahlt werden. Empfohlen.</string>
+    <string name="logging">Protokollierung</string>
+    <string name="logging_desc">Schreibt Erkennungsereignisse in eine Protokolldatei zur Fehlersuche.</string>
+    <string name="share_log">Protokoll teilen</string>
     <string name="help">\?</string>
 
     <!-- Themes -->
