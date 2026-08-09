@@ -98,6 +98,9 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
     private volatile boolean released = false;
 
     private DebugLogger logger;
+    // Throttle for verbose raw-detection logging
+    private long lastRawLogTime = 0;
+    private boolean lastInferenceOn = true;
 
     private final String helpText = "Halten Sie das Handy hoch oder quer und richten Sie die Kamera auf die Ampel. " +
             "Falls Sie das Handy falsch halten wird es vibrieren und eine Sprachnachricht wird abgespielt.\n" +
@@ -362,6 +365,22 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
                 }
             }
 
+            // Verbose diagnostic logging (throttled to ~1s): shows the raw model
+            // output regardless of the confidence threshold, so we can tell whether
+            // a missed light was below-threshold or not detected at all.
+            if (logger.isEnabled()
+                    && System.currentTimeMillis() - lastRawLogTime >= 1000) {
+                lastRawLogTime = System.currentTimeMillis();
+                Classifier.Recognition topRed = topByLabel(results, "red");
+                Classifier.Recognition topGreen = topByLabel(results, "green");
+                logger.log("RAW", String.format(Locale.US,
+                        "src=%dx%d topRed=%.2f topGreen=%.2f valid>=%.2f=%d buffer=%s",
+                        width, height,
+                        topRed != null && topRed.getConfidence() != null ? topRed.getConfidence() : 0f,
+                        topGreen != null && topGreen.getConfidence() != null ? topGreen.getConfidence() : 0f,
+                        MIN_CONFIDENCE, valid.size(), recentResults.toString()));
+            }
+
             // Determine the biggest (closest) detection
             Classifier.Recognition biggest = biggestRecognition(valid);
             String currentLight = "none";
@@ -417,6 +436,19 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
         return true;
     }
 
+    /** Highest-confidence recognition for a given label, across all raw results. */
+    private Classifier.Recognition topByLabel(List<Classifier.Recognition> recognitions, String label) {
+        Classifier.Recognition top = null;
+        float best = -1f;
+        for (Classifier.Recognition r : recognitions) {
+            if (label.equals(r.getTitle()) && r.getConfidence() != null && r.getConfidence() > best) {
+                best = r.getConfidence();
+                top = r;
+            }
+        }
+        return top;
+    }
+
     private Classifier.Recognition biggestRecognition(List<Classifier.Recognition> recognitions) {
         Classifier.Recognition biggest = null;
         double biggestArea = 0.0;
@@ -463,6 +495,11 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
             inferenceOn = false;
         } else {
             inferenceOn = true;
+        }
+        if (inferenceOn != lastInferenceOn) {
+            lastInferenceOn = inferenceOn;
+            logger.log("TILT", "inferenceOn=" + inferenceOn
+                    + String.format(Locale.US, " (gravityZ=%.1f)", z));
         }
     }
 
