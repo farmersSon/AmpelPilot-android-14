@@ -16,6 +16,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
+import android.graphics.Matrix;
 import android.graphics.RectF;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
@@ -28,6 +29,8 @@ import android.os.Vibrator;
 import android.os.VibratorManager;
 import android.speech.tts.TextToSpeech;
 import android.util.Log;
+import android.view.OrientationEventListener;
+import android.view.Surface;
 import android.widget.Toast;
 
 import com.google.common.util.concurrent.ListenableFuture;
@@ -93,6 +96,8 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
     // colours from being washed out - improving detection. Can be disabled in settings.
     private Camera camera;
     private boolean useTorch = true;
+    private ImageAnalysis imageAnalysis;
+    private OrientationEventListener orientationListener;
 
     private volatile boolean detecting = false;
     private volatile boolean released = false;
@@ -177,6 +182,27 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
 
         analysisExecutor = Executors.newSingleThreadExecutor();
 
+        // Track device orientation and keep the analysis target rotation in sync,
+        // so imageInfo.rotationDegrees stays correct even though configChanges
+        // prevents activity recreation on rotation.
+        orientationListener = new OrientationEventListener(this) {
+            @Override
+            public void onOrientationChanged(int orientation) {
+                if (orientation == ORIENTATION_UNKNOWN || imageAnalysis == null) return;
+                int rotation;
+                if (orientation >= 45 && orientation < 135) {
+                    rotation = Surface.ROTATION_270;
+                } else if (orientation >= 135 && orientation < 225) {
+                    rotation = Surface.ROTATION_180;
+                } else if (orientation >= 225 && orientation < 315) {
+                    rotation = Surface.ROTATION_90;
+                } else {
+                    rotation = Surface.ROTATION_0;
+                }
+                imageAnalysis.setTargetRotation(rotation);
+            }
+        };
+
         startCamera();
     }
 
@@ -202,11 +228,17 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
         } else {
             inferenceOn = true;
         }
+        if (orientationListener != null && orientationListener.canDetectOrientation()) {
+            orientationListener.enable();
+        }
     }
 
     @Override
     protected void onPause() {
         super.onPause();
+        if (orientationListener != null) {
+            orientationListener.disable();
+        }
         mSensorManager.unregisterListener(this);
         if (v != null) v.cancel();
     }
@@ -264,11 +296,15 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
 
         // Higher analysis resolution (1280x720) gives the model more detail to work
         // with before it is scaled down to the model input size.
-        ImageAnalysis imageAnalysis = new ImageAnalysis.Builder()
+        imageAnalysis = new ImageAnalysis.Builder()
                 .setTargetResolution(new android.util.Size(1280, 720))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                 .build();
+
+        // Keep the analysis target rotation aligned with the current display so
+        // imageInfo.rotationDegrees tells us how to make each frame upright.
+        imageAnalysis.setTargetRotation(getWindowManager().getDefaultDisplay().getRotation());
 
         imageAnalysis.setAnalyzer(analysisExecutor, this::analyzeFrame);
 
@@ -325,10 +361,12 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
         detecting = true;
         Bitmap fullBitmap = null;
         Bitmap cropped = null;
+        Bitmap upright = null;
         Bitmap modelInput = null;
         try {
             int width = image.getWidth();
             int height = image.getHeight();
+            int rotationDegrees = image.getImageInfo().getRotationDegrees();
 
             // CameraX RGBA_8888: single plane, but rows may be padded.
             // Account for the row stride so the image is not sheared.
@@ -348,8 +386,20 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
                 cropped = fullBitmap;
             }
 
+            // Rotate to upright based on the camera's reported rotation, so the
+            // model always receives traffic lights vertical, regardless of whether
+            // the phone is held in portrait or landscape.
+            if (rotationDegrees != 0) {
+                Matrix m = new Matrix();
+                m.postRotate(rotationDegrees);
+                upright = Bitmap.createBitmap(cropped, 0, 0,
+                        cropped.getWidth(), cropped.getHeight(), m, true);
+            } else {
+                upright = cropped;
+            }
+
             // Scale to the model input size (300x300)
-            modelInput = Bitmap.createScaledBitmap(cropped, TF_INPUT_SIZE, TF_INPUT_SIZE, true);
+            modelInput = Bitmap.createScaledBitmap(upright, TF_INPUT_SIZE, TF_INPUT_SIZE, true);
 
             if (released || detector == null) {
                 return;
@@ -374,8 +424,8 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
                 Classifier.Recognition topRed = topByLabel(results, "red");
                 Classifier.Recognition topGreen = topByLabel(results, "green");
                 logger.log("RAW", String.format(Locale.US,
-                        "src=%dx%d topRed=%.2f topGreen=%.2f valid>=%.2f=%d buffer=%s",
-                        width, height,
+                        "src=%dx%d rot=%d topRed=%.2f topGreen=%.2f valid>=%.2f=%d buffer=%s",
+                        width, height, rotationDegrees,
                         topRed != null && topRed.getConfidence() != null ? topRed.getConfidence() : 0f,
                         topGreen != null && topGreen.getConfidence() != null ? topGreen.getConfidence() : 0f,
                         MIN_CONFIDENCE, valid.size(), recentResults.toString()));
@@ -417,7 +467,8 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
             Log.e(TAG, "Error analyzing frame", e);
         } finally {
             // Recycle bitmaps (guard against the shared-instance cases)
-            if (modelInput != null && modelInput != cropped) modelInput.recycle();
+            if (modelInput != null && modelInput != upright) modelInput.recycle();
+            if (upright != null && upright != cropped) upright.recycle();
             if (cropped != null && cropped != fullBitmap) cropped.recycle();
             if (fullBitmap != null) fullBitmap.recycle();
             detecting = false;
