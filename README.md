@@ -24,17 +24,32 @@ This replaces the original OpenCV Haar/LBP cascade classifiers for significantly
 - A **stability buffer** requires the same phase across several consecutive frames before
   announcing, to avoid false positives.
 - **DetectionOverlayView** draws bounding boxes over the preview.
-- **Sensor-based tilt guidance** (accelerometer + magnetometer) vibrates and speaks hints to
-  help visually impaired users aim the camera correctly.
+- **Optional tilt-pause** (gravity sensor): if enabled in settings, detection pauses while
+  the phone is held flat and prompts the user to raise the camera. Off by default.
 
 ## Functionality
 
 - Real-time red/green pedestrian traffic light detection
 - Text-to-speech announcements ("Es ist rot" / "Es ist grün")
 - Distinct vibration patterns per phase (red = pulsing pattern, green = solid 1s)
-- Tilt feedback when the phone is held at a poor angle
 - Configurable stability window (Settings → "Dauer bis zur Erkennung")
+- Optional flashlight/torch to keep LED colours from washing out (Settings, on by default)
+- Optional tilt-pause when the phone is held flat (Settings, off by default)
+- Opt-in debug logging with a "share log" option (Settings)
 - Works in portrait and landscape
+
+## Known Limitations
+
+- **German pedestrian traffic lights only.** The model is trained on the German Ampel-Pilot
+  dataset (red standing figure / green walking figure). It detects those pedestrian phases
+  and is not intended for vehicle traffic lights.
+- **Tram / light-rail signals (Straßenbahn) are not detected.** German tram signals use
+  BOStrab "Fahrsignale" (F0–F5) — white bar/line symbols on a dark matrix, not red/green
+  discs. They share none of the pedestrian-signal visual features (colour, shape, symbol),
+  so the model correctly returns no detection for them. Supporting tram signals would require
+  a different or retrained model that includes tram-signal classes.
+- **Not a substitute for your own judgement.** Use only as an additional aid; night, glare,
+  distance, and multi-lane crossings reduce accuracy.
 
 ## Changes from Original
 
