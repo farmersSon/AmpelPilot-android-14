@@ -51,6 +51,40 @@ This replaces the original OpenCV Haar/LBP cascade classifiers for significantly
 - **Not a substitute for your own judgement.** Use only as an additional aid; night, glare,
   distance, and multi-lane crossings reduce accuracy.
 
+## Internationalization / Porting to Other Countries
+
+The app currently works reliably only for **German pedestrian traffic lights**. The detection
+model was trained on the German Ampel-Pilot dataset and recognizes the German Ampelmännchen
+(red standing figure / green walking figure) via its learned appearance — it does not do
+generic colour/shape detection.
+
+How other countries compare:
+
+| Country | Pedestrian signal | Works today? |
+|---------|-------------------|--------------|
+| 🇩🇪 Germany | Red standing / green walking figure | Yes (trained for this) |
+| 🇬🇧 UK | Red standing man / green walking man (steady) | Maybe partial, unvalidated (different figure design/hue) |
+| 🇪🇺 Continental EU | Red/green human figures (varied designs) | Possibly partial, unvalidated |
+| 🇺🇸 US / 🇨🇦 Canada | Orange raised hand + white walking person, often countdown | No (wrong colours and symbol) |
+
+The **app architecture is country-agnostic** — the CameraX pipeline, TFLite inference,
+stability buffer, torch control, orientation handling, and TTS are all reusable. Only three
+pieces are locale-specific:
+
+1. **The model + `app/src/main/assets/labelmap.txt`** — the main effort. Fine-tune or retrain
+   on datasets that include the target country's pedestrian signals, and update the labels
+   (e.g. add classes such as `walk_hand` / `countdown`). Keep the SSD MobileNet 300×300
+   float input/output contract, or update `TFLiteDetector` accordingly. The `/home/ali/ampel/`
+   YOLOv8 training pipeline is a starting point (note: its bundled LISA dataset is US *vehicle*
+   lights, not pedestrian).
+2. **Spoken strings** — the announcements ("Es ist rot", "Es ist grün", "Warte!",
+   "Halten Sie die Kamera bitte hoch!") are currently hard-coded German in `LdActivity`.
+   Move them to `strings.xml` and provide per-locale `values-xx/strings.xml`.
+3. **Optional region/model selector** — bundle multiple models or let the user choose a
+   country, loading the matching `.tflite` + labels + announcement locale.
+
+In short, internationalization is primarily a **model/dataset task**, not an app rewrite.
+
 ## Changes from Original
 
 - **Target/Min SDK**: raised from API 23/19 to API 34 (Android 14+)
