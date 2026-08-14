@@ -5,6 +5,7 @@ import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.camera.core.Camera;
 import androidx.camera.core.CameraSelector;
+import androidx.camera.core.ExposureState;
 import androidx.camera.core.ImageAnalysis;
 import androidx.camera.core.ImageProxy;
 import androidx.camera.core.Preview;
@@ -80,6 +81,17 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
     private final LinkedList<String> recentResults = new LinkedList<>();
     private int stabilityWindow = 4;
     private long lastAnnounceTime = 0;
+
+    // Adaptive exposure: when the scene is blank for a while (e.g. bright sun
+    // washing out the signal), step the exposure down so the coloured figure
+    // stops clipping to white. Reset to neutral once we detect again.
+    private long lastValidDetectionTime = System.currentTimeMillis();
+    private long lastExposureStepTime = 0;
+    private int currentExposureIndex = 0;
+    private long noSignalHintTime = 0;
+    private static final long NO_SIGNAL_HINT_INTERVAL_MS = 9000;
+    private static final long EXPOSURE_STEP_INTERVAL_MS = 2500;
+    private static final long BLANK_BEFORE_ADAPT_MS = 4000;
 
     // Vibration patterns
     private final long[] redPattern = {0, 200, 300, 200, 300, 200};
@@ -313,6 +325,11 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
                 this, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageAnalysis);
 
         applyTorch();
+
+        // Start from neutral exposure; adaptive logic will lower it if the scene
+        // is washed out and nothing is being detected.
+        currentExposureIndex = 0;
+        setExposureIndex(0);
     }
 
     /**
@@ -354,6 +371,9 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
                 speak("Halten Sie die Kamera bitte hoch!");
             }
             overlayView.setDetections(new ArrayList<>(), new ArrayList<>(), TF_INPUT_SIZE, TF_INPUT_SIZE);
+            // Keep the "blank" timer fresh so the no-signal hint / exposure
+            // adaptation don't fire immediately when detection resumes.
+            lastValidDetectionTime = System.currentTimeMillis();
             image.close();
             return;
         }
@@ -415,6 +435,19 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
                 }
             }
 
+            // Determine the biggest (closest) detection
+            Classifier.Recognition biggest = biggestRecognition(valid);
+            String currentLight = "none";
+            if (biggest != null) {
+                currentLight = biggest.getTitle();
+            }
+
+            // Adaptive exposure + no-signal hint, driven by whether we detected
+            // anything this frame. Also compute a cheap luminance for the log.
+            boolean haveDetection = !valid.isEmpty();
+            int luminance = averageLuminance(modelInput);
+            handleExposureAndHints(haveDetection, luminance);
+
             // Verbose diagnostic logging (throttled to ~1s): shows the raw model
             // output regardless of the confidence threshold, so we can tell whether
             // a missed light was below-threshold or not detected at all.
@@ -424,18 +457,11 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
                 Classifier.Recognition topRed = topByLabel(results, "red");
                 Classifier.Recognition topGreen = topByLabel(results, "green");
                 logger.log("RAW", String.format(Locale.US,
-                        "src=%dx%d rot=%d topRed=%.2f topGreen=%.2f valid>=%.2f=%d buffer=%s",
-                        width, height, rotationDegrees,
+                        "src=%dx%d rot=%d lum=%d ev=%d topRed=%.2f topGreen=%.2f valid>=%.2f=%d buffer=%s",
+                        width, height, rotationDegrees, luminance, currentExposureIndex,
                         topRed != null && topRed.getConfidence() != null ? topRed.getConfidence() : 0f,
                         topGreen != null && topGreen.getConfidence() != null ? topGreen.getConfidence() : 0f,
                         MIN_CONFIDENCE, valid.size(), recentResults.toString()));
-            }
-
-            // Determine the biggest (closest) detection
-            Classifier.Recognition biggest = biggestRecognition(valid);
-            String currentLight = "none";
-            if (biggest != null) {
-                currentLight = biggest.getTitle();
             }
 
             // Rolling stability buffer
@@ -473,6 +499,99 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
             if (fullBitmap != null) fullBitmap.recycle();
             detecting = false;
             image.close();
+        }
+    }
+
+    /**
+     * Cheap average luminance over a coarse grid of the model-input bitmap.
+     * Used for diagnostics and to detect a washed-out (over-bright) scene.
+     */
+    private int averageLuminance(Bitmap bmp) {
+        if (bmp == null) return -1;
+        int w = bmp.getWidth();
+        int h = bmp.getHeight();
+        int step = Math.max(1, w / 20);
+        long sum = 0;
+        int count = 0;
+        for (int y = 0; y < h; y += step) {
+            for (int x = 0; x < w; x += step) {
+                int p = bmp.getPixel(x, y);
+                int r = (p >> 16) & 0xFF;
+                int g = (p >> 8) & 0xFF;
+                int b = p & 0xFF;
+                sum += (r * 299 + g * 587 + b * 114) / 1000; // Rec. 601 luma
+                count++;
+            }
+        }
+        return count == 0 ? -1 : (int) (sum / count);
+    }
+
+    /**
+     * When the scene is blank (nothing detected) for a while - typically bright
+     * sunlight washing the signal out - progressively lower the camera exposure
+     * so the coloured figure stops clipping to white. Once we detect again, snap
+     * exposure back to neutral. Also speak an occasional hint so a visually
+     * impaired user knows to re-aim the camera.
+     */
+    private void handleExposureAndHints(boolean haveDetection, int luminance) {
+        long now = System.currentTimeMillis();
+
+        if (haveDetection) {
+            lastValidDetectionTime = now;
+            noSignalHintTime = 0;
+            if (currentExposureIndex != 0) {
+                setExposureIndex(0); // back to neutral once the signal is visible
+            }
+            return;
+        }
+
+        long blankFor = now - lastValidDetectionTime;
+        if (blankFor < BLANK_BEFORE_ADAPT_MS || !inferenceOn) {
+            return;
+        }
+
+        // Step exposure down periodically while the scene stays blank AND bright
+        // (glare). No point darkening a normally-lit scene where the light is
+        // simply out of frame.
+        if (luminance >= 150 && now - lastExposureStepTime >= EXPOSURE_STEP_INTERVAL_MS) {
+            lastExposureStepTime = now;
+            stepExposureDown();
+        }
+
+        // Occasional spoken hint so the user knows detection is not working.
+        if (now - noSignalHintTime >= NO_SIGNAL_HINT_INTERVAL_MS) {
+            noSignalHintTime = now;
+            speak("Keine Ampel erkannt. Bitte Kamera neu ausrichten.");
+        }
+    }
+
+    private void stepExposureDown() {
+        if (camera == null) return;
+        try {
+            ExposureState es = camera.getCameraInfo().getExposureState();
+            if (!es.isExposureCompensationSupported()) return;
+            int min = es.getExposureCompensationRange().getLower();
+            int next = currentExposureIndex - 1;
+            if (next < min) next = 0; // wrap back to neutral and cycle again
+            setExposureIndex(next);
+            logger.log("EXPOSURE", "stepDown -> index=" + next + " (min=" + min + ")");
+        } catch (Exception e) {
+            Log.w(TAG, "Exposure adjust failed", e);
+        }
+    }
+
+    private void setExposureIndex(int index) {
+        if (camera == null) return;
+        try {
+            ExposureState es = camera.getCameraInfo().getExposureState();
+            if (!es.isExposureCompensationSupported()) return;
+            int min = es.getExposureCompensationRange().getLower();
+            int max = es.getExposureCompensationRange().getUpper();
+            int clamped = Math.max(min, Math.min(max, index));
+            camera.getCameraControl().setExposureCompensationIndex(clamped);
+            currentExposureIndex = clamped;
+        } catch (Exception e) {
+            Log.w(TAG, "setExposureIndex failed", e);
         }
     }
 
