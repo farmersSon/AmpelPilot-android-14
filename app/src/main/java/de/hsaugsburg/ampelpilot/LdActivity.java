@@ -89,13 +89,23 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
     private long lastExposureStepTime = 0;
     private int currentExposureIndex = 0;
     private long noSignalHintTime = 0;
-    private static final long NO_SIGNAL_HINT_INTERVAL_MS = 9000;
+    // [FEATURE: FASTER_NO_SIGNAL_HINT]
+    // Shortened hint interval from 9s to 5s for faster feedback when no signal is detected
+    private static final long NO_SIGNAL_HINT_INTERVAL_MS = 5000;
     private static final long EXPOSURE_STEP_INTERVAL_MS = 2500;
-    private static final long BLANK_BEFORE_ADAPT_MS = 4000;
+    private static final long BLANK_BEFORE_ADAPT_MS = 2500;
 
     // Vibration patterns
     private final long[] redPattern = {0, 200, 300, 200, 300, 200};
     private final int greenDuration = 1000;
+
+    // [FEATURE: BLINKING_GREEN]
+    // Blinking green vibration pattern: rapid short pulses (150ms on / 150ms off)
+    private final long[] blinkingPattern = {0, 150, 150, 150, 150, 150};
+    // Rolling buffer dedicated to detecting green blinking over a ~1-2s window
+    private final LinkedList<String> blinkingHistory = new LinkedList<>();
+    private static final int BLINKING_WINDOW_SIZE = 12;
+    private long lastBlinkingAnnounceTime = 0;
 
     private SharedPreferences prefs;
 
@@ -418,8 +428,10 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
                 upright = cropped;
             }
 
-            // Scale to the model input size (300x300)
-            modelInput = Bitmap.createScaledBitmap(upright, TF_INPUT_SIZE, TF_INPUT_SIZE, true);
+            // [FEATURE: YOLOV8_TFLITE_SUPPORT]
+            // Dynamically scale according to the model's actual input size (300 for SSD, 640 for YOLO)
+            int effectiveInputSize = (detector != null) ? detector.getInputSize() : TF_INPUT_SIZE;
+            modelInput = Bitmap.createScaledBitmap(upright, effectiveInputSize, effectiveInputSize, true);
 
             if (released || detector == null) {
                 return;
@@ -470,7 +482,20 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
                 recentResults.removeFirst();
             }
 
-            if (biggest != null && isStable()) {
+            // [FEATURE: BLINKING_GREEN]
+            // Track detections in a slightly longer history buffer to detect periodic on-off blinking
+            blinkingHistory.add(currentLight);
+            while (blinkingHistory.size() > BLINKING_WINDOW_SIZE) {
+                blinkingHistory.removeFirst();
+            }
+
+            // Check for blinking green phase first (prioritized over steady green)
+            if (isBlinkingGreen()) {
+                if (System.currentTimeMillis() - lastBlinkingAnnounceTime >= 2000) {
+                    lastBlinkingAnnounceTime = System.currentTimeMillis();
+                    provideBlinkingFeedback();
+                }
+            } else if (biggest != null && isStable()) {
                 if (System.currentTimeMillis() - lastAnnounceTime >= 1500) {
                     lastAnnounceTime = System.currentTimeMillis();
                     provideFeedback(currentLight);
@@ -481,13 +506,13 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
             List<RectF> greenRects = new ArrayList<>();
             List<RectF> redRects = new ArrayList<>();
             for (Classifier.Recognition r : valid) {
-                if ("green".equals(r.getTitle())) {
+                if ("green".equalsIgnoreCase(r.getTitle())) {
                     greenRects.add(r.getLocation());
-                } else if ("red".equals(r.getTitle())) {
+                } else if ("red".equalsIgnoreCase(r.getTitle())) {
                     redRects.add(r.getLocation());
                 }
             }
-            overlayView.setDetections(greenRects, redRects, TF_INPUT_SIZE, TF_INPUT_SIZE);
+            overlayView.setDetections(greenRects, redRects, effectiveInputSize, effectiveInputSize);
 
         } catch (Exception e) {
             Log.e(TAG, "Error analyzing frame", e);
@@ -561,8 +586,66 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
         // Occasional spoken hint so the user knows detection is not working.
         if (now - noSignalHintTime >= NO_SIGNAL_HINT_INTERVAL_MS) {
             noSignalHintTime = now;
-            speak("Keine Ampel erkannt. Bitte Kamera neu ausrichten.");
+            // [FEATURE: NIGHT_WARNING]
+            // If it's night time (22:00 - 06:00), warn user that traffic lights may be powered down (Nachtabschaltung)
+            if (isNightTime()) {
+                speak("Keine Ampel erkannt. Achtung: M\u00f6gliche Nachtabschaltung. Bitte vorsichtig sein.");
+            } else {
+                speak("Keine Ampel erkannt. Bitte Kamera neu ausrichten.");
+            }
         }
+    }
+
+    // [FEATURE: BLINKING_GREEN]
+    /**
+     * Checks if the green pedestrian light is blinking.
+     * Evaluates the recent detection history to see if 'green' and 'none' alternate repeatedly,
+     * without any 'red' detections mixed in.
+     */
+    private boolean isBlinkingGreen() {
+        if (blinkingHistory.size() < 6) return false;
+
+        int greenCount = 0;
+        int noneCount = 0;
+        for (String s : blinkingHistory) {
+            if ("red".equals(s)) return false; // Red present -> not blinking green
+            if ("green".equals(s)) greenCount++;
+            else if ("none".equals(s)) noneCount++;
+        }
+
+        // Must have a meaningful balance of both states
+        if (greenCount < 2 || noneCount < 2) return false;
+
+        // Count state transitions (green <-> none)
+        int transitions = 0;
+        String prev = null;
+        for (String s : blinkingHistory) {
+            if (prev != null && !prev.equals(s)) {
+                transitions++;
+            }
+            prev = s;
+        }
+
+        return transitions >= 3;
+    }
+
+    // [FEATURE: BLINKING_GREEN]
+    /**
+     * Dispatches urgent audio and rapid vibration feedback when green light is blinking.
+     */
+    private void provideBlinkingFeedback() {
+        vibratePattern(blinkingPattern);
+        speak("Gr\u00fcn blinkt! Nicht mehr losgehen!");
+        logger.log("DETECTION", "phase=green_blinking -> announce + rapid vibrate");
+    }
+
+    // [FEATURE: NIGHT_WARNING]
+    /**
+     * Checks if the local time is between 22:00 (10 PM) and 06:00 (6 AM).
+     */
+    private boolean isNightTime() {
+        int hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY);
+        return hour >= 22 || hour < 6;
     }
 
     private void stepExposureDown() {
@@ -619,29 +702,50 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
         return top;
     }
 
+    // [FEATURE: 3CLASS_SIGNAL_BOX_DETECTION]
+    // Prioritize active light phases (red/green) over the larger housing box.
+    // Fall back to housing detection only when no active red/green light is visible (e.g. unlit or nighttime).
     private Classifier.Recognition biggestRecognition(List<Classifier.Recognition> recognitions) {
-        Classifier.Recognition biggest = null;
-        double biggestArea = 0.0;
+        Classifier.Recognition biggestActiveLight = null;
+        Classifier.Recognition biggestHousing = null;
+        double maxLightArea = 0.0;
+        double maxHousingArea = 0.0;
+
         for (Classifier.Recognition r : recognitions) {
+            String title = r.getTitle();
             RectF loc = r.getLocation();
+            if (loc == null) continue;
             double area = loc.width() * loc.height();
-            if (area > biggestArea) {
-                biggestArea = area;
-                biggest = r;
+
+            if ("red".equalsIgnoreCase(title) || "green".equalsIgnoreCase(title)) {
+                if (area > maxLightArea) {
+                    maxLightArea = area;
+                    biggestActiveLight = r;
+                }
+            } else if (title != null && title.toLowerCase().contains("traffic light")) {
+                if (area > maxHousingArea) {
+                    maxHousingArea = area;
+                    biggestHousing = r;
+                }
             }
         }
-        return biggest;
+        return biggestActiveLight != null ? biggestActiveLight : biggestHousing;
     }
 
     private void provideFeedback(String lightPhase) {
-        if ("red".equals(lightPhase)) {
+        if ("red".equalsIgnoreCase(lightPhase)) {
             vibratePattern(redPattern);
             speak("Es ist rot");
             logger.log("DETECTION", "stable phase=red -> announce + vibrate");
-        } else if ("green".equals(lightPhase)) {
+        } else if ("green".equalsIgnoreCase(lightPhase)) {
             vibrateOnce(greenDuration);
-            speak("Es ist gr\u00fcn");
+            speak("Es ist grün");
             logger.log("DETECTION", "stable phase=green -> announce + vibrate");
+        } else if (lightPhase != null && lightPhase.toLowerCase().contains("traffic light")) {
+            // [FEATURE: 3CLASS_SIGNAL_BOX_DETECTION]
+            // Announce when traffic light box is recognized but lamps are off
+            speak("Ampel erkannt, Licht ist aus.");
+            logger.log("DETECTION", "stable phase=housing (unlit) -> announce");
         }
     }
 

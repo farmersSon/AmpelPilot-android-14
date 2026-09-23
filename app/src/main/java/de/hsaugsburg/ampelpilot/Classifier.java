@@ -12,6 +12,10 @@ public interface Classifier {
 
     List<Recognition> recognizeImage(Bitmap bitmap);
 
+    default int getInputSize() {
+        return 300;
+    }
+
     void close();
 
     /**
