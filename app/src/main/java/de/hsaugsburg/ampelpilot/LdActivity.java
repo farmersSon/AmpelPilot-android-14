@@ -502,17 +502,9 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
                 }
             }
 
-            // Build overlay rectangles (in model-input coordinate space, 300x300)
-            List<RectF> greenRects = new ArrayList<>();
-            List<RectF> redRects = new ArrayList<>();
-            for (Classifier.Recognition r : valid) {
-                if ("green".equalsIgnoreCase(r.getTitle())) {
-                    greenRects.add(r.getLocation());
-                } else if ("red".equalsIgnoreCase(r.getTitle())) {
-                    redRects.add(r.getLocation());
-                }
-            }
-            overlayView.setDetections(greenRects, redRects, effectiveInputSize, effectiveInputSize);
+            // [FEATURE: VISUAL_BOUNDING_BOXES_WITH_LABELS]
+            // Draw real-time bounding boxes with color badges, emojis, and confidence %
+            overlayView.setRecognitions(valid, effectiveInputSize, effectiveInputSize);
 
         } catch (Exception e) {
             Log.e(TAG, "Error analyzing frame", e);
