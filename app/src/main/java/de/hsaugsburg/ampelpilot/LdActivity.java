@@ -57,8 +57,8 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
     private static final int TF_INPUT_SIZE = 300;
     private static final boolean TF_IS_QUANTIZED = false;
     private static final String TF_MODEL_FILE = "detect.tflite";
-    private static final String TF_LABELS_FILE = "labelmap.txt";
-    private static final float MIN_CONFIDENCE = 0.6f;
+    // [FEATURE: YOLOV8_THRESHOLD] Lower confidence threshold to match YOLOv8 standard (0.25f)
+    private static final float MIN_CONFIDENCE = 0.25f;
 
     // Tilt handling: gravity Z above this means the phone is lying nearly flat
     private static final float FLAT_GRAVITY_Z = 8.0f;

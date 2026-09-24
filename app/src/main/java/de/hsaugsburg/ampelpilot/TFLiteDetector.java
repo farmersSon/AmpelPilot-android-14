@@ -50,7 +50,7 @@ public class TFLiteDetector implements Classifier {
     private int yoloNumBoxes = 8400;
     private int yoloNumChannels = 6;
     private float[][][] yoloOutput;
-    private static final float YOLO_CONFIDENCE_THRESHOLD = 0.25f;
+    private static final float YOLO_CONFIDENCE_THRESHOLD = 0.20f;
     private static final float YOLO_IOU_THRESHOLD = 0.45f;
 
     // SSD MobileNet output containers
