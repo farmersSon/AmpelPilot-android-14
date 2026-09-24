@@ -12,3 +12,6 @@ local.properties
 /opencv/build
 .venv/
 __pycache__/
+unified_dataset/
+raw_datasets/
+runs/
