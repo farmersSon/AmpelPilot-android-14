@@ -195,7 +195,7 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
         try {
             detector = TFLiteDetector.create(
                     getAssets(), TF_MODEL_FILE, TF_LABELS_FILE, TF_INPUT_SIZE, TF_IS_QUANTIZED);
-            logger.log("MODEL", "TFLite detector loaded (" + TF_MODEL_FILE + ")");
+            logger.log("MODEL", "TFLite detector loaded (" + TF_MODEL_FILE + ") inputSize=" + detector.getInputSize());
         } catch (Exception e) {
             Log.e(TAG, "Failed to initialize TFLite detector", e);
             logger.log("MODEL", "Failed to load detector: " + e.getMessage());
@@ -509,6 +509,7 @@ public class LdActivity extends AppCompatActivity implements SensorEventListener
 
         } catch (Exception e) {
             Log.e(TAG, "Error analyzing frame", e);
+            logger.log("ANALYZE_ERROR", e.getMessage() != null ? e.getMessage() : e.toString());
         } finally {
             // Recycle bitmaps (guard against the shared-instance cases)
             if (modelInput != null && modelInput != upright) modelInput.recycle();

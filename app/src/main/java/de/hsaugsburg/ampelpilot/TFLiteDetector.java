@@ -46,6 +46,7 @@ public class TFLiteDetector implements Classifier {
     // [FEATURE: YOLOV8_TFLITE_SUPPORT]
     // Model architecture auto-detection
     private boolean isYoloModel = false;
+    private boolean isInputChannelsFirst = false; // [1, 3, H, W] (NCHW) vs [1, H, W, 3] (NHWC)
     private boolean isYoloChannelsFirst = true; // [1, 4+C, 8400] vs [1, 8400, 4+C]
     private int yoloNumBoxes = 8400;
     private int yoloNumChannels = 6;
@@ -108,11 +109,23 @@ public class TFLiteDetector implements Classifier {
         }
 
         // [FEATURE: YOLOV8_TFLITE_SUPPORT]
-        // Dynamically inspect model tensor input shape
+        // Dynamically inspect model tensor input shape: handle both NCHW ([1, 3, 640, 640]) and NHWC ([1, 640, 640, 3])
         try {
             int[] inputShape = d.tfLite.getInputTensor(0).shape();
-            if (inputShape != null && inputShape.length >= 3 && inputShape[1] > 0) {
-                d.inputSize = inputShape[1]; // Typically 300 for SSD, 640 for YOLO
+            if (inputShape != null && inputShape.length == 4) {
+                if (inputShape[1] == 3) {
+                    // Ultralytics PyTorch export: [1, 3, H, W] (NCHW)
+                    d.isInputChannelsFirst = true;
+                    d.inputSize = inputShape[2]; // 640
+                } else if (inputShape[3] == 3) {
+                    // Standard TensorFlow export: [1, H, W, 3] (NHWC)
+                    d.isInputChannelsFirst = false;
+                    d.inputSize = inputShape[1]; // 640 or 300
+                } else {
+                    d.inputSize = defaultInputSize;
+                }
+            } else if (inputShape != null && inputShape.length >= 3 && inputShape[1] > 0) {
+                d.inputSize = inputShape[1];
             } else {
                 d.inputSize = defaultInputSize;
             }
@@ -174,9 +187,32 @@ public class TFLiteDetector implements Classifier {
         bitmap.getPixels(intValues, 0, bitmap.getWidth(), 0, 0, bitmap.getWidth(), bitmap.getHeight());
 
         imgData.rewind();
-        for (int i = 0; i < inputSize; ++i) {
-            for (int j = 0; j < inputSize; ++j) {
-                int pixelValue = intValues[i * inputSize + j];
+        int totalPixels = inputSize * inputSize;
+
+        if (isInputChannelsFirst) {
+            // NCHW format: [1, 3, H, W] -> R plane, then G plane, then B plane
+            // 1. Red channel
+            for (int i = 0; i < totalPixels; ++i) {
+                int pixelValue = intValues[i];
+                float r = ((pixelValue >> 16) & 0xFF) / 255.0f;
+                imgData.putFloat(r);
+            }
+            // 2. Green channel
+            for (int i = 0; i < totalPixels; ++i) {
+                int pixelValue = intValues[i];
+                float g = ((pixelValue >> 8) & 0xFF) / 255.0f;
+                imgData.putFloat(g);
+            }
+            // 3. Blue channel
+            for (int i = 0; i < totalPixels; ++i) {
+                int pixelValue = intValues[i];
+                float b = (pixelValue & 0xFF) / 255.0f;
+                imgData.putFloat(b);
+            }
+        } else {
+            // NHWC format: [1, H, W, 3] -> Interleaved RGB
+            for (int i = 0; i < totalPixels; ++i) {
+                int pixelValue = intValues[i];
                 int r = (pixelValue >> 16) & 0xFF;
                 int g = (pixelValue >> 8) & 0xFF;
                 int b = pixelValue & 0xFF;
